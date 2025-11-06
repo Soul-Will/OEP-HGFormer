@@ -1,0 +1,77 @@
+# Pretrained model
+pretrained_checkpoint: "checkpoints/ssl/best_model.pth"
+
+# Model configuration
+model:
+  num_classes: 2
+  freeze_encoder: true
+  unfreeze_epoch: 250
+
+# Decoder configuration
+decoder:
+  encoder_channels: [32, 64, 160, 256]
+  decoder_channels: [256, 128, 64, 32]
+  use_attention: true
+
+# Training hyperparameters
+training:
+  epochs: 500
+  batch_size: 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  
+  # Learning rate scheduler
+  scheduler: "ReduceLROnPlateau"
+  patience: 20
+  lr_factor: 0.5
+  min_lr: 1.0e-6
+  
+  # Early stopping
+  early_stopping: true
+  early_stopping_patience: 50
+  
+  # Validation frequency
+  val_freq: 1
+  save_freq: 10
+
+# Loss configuration
+loss:
+  alpha_start: 1.0
+  alpha_decay: 0.01
+  alpha_min: 0.01
+
+# Data configuration
+data:
+  # ✅ UPDATED: Points to processed .npy files
+  train_dir: "data/processed/volumes_labeled"
+  val_dir: "data/processed/volumes_labeled"
+  test_dir: "data/processed/volumes_labeled"
+  
+  # Augmentation
+  use_augmentation: true
+  augmentation_prob: 0.5
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+
+# Augmentation (less aggressive than SSL)
+augmentation:
+  blur_std_range: [0, 1]
+  noise_std_range: [0, 0.05]
+  affine_scales: [0.95, 1.05]
+  affine_degrees: 10
+  affine_translation: 3
+
+# Paths
+paths:
+  output_dir: "checkpoints/finetune"
+  log_dir: "logs/finetune"
+
+# Visualization
+visualization:
+  save_predictions: true
+  save_freq: 20
+  num_samples: 4
