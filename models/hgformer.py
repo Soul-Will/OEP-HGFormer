@@ -13,7 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 try:
-    from attention import  CS_KNN_3D
+    from .attention import CS_KNN_3D
 except ImportError:
     import sys
     from pathlib import Path

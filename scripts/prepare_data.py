@@ -13,6 +13,7 @@ from tqdm import tqdm
 import json
 import logging
 from typing import Dict, List, Optional
+import tifffile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -322,8 +323,11 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
             
             try:
                 # Load image and mask
-                img = np.array(Image.open(img_file)).astype(np.float32)
-                mask = np.array(Image.open(mask_file)).astype(np.int64)
+                # img = np.array(Image.open(img_file)).astype(np.float32)
+                # mask = np.array(Image.open(mask_file)).astype(np.int64)
+                # --- NEW 3D LOADING ---
+                img = tifffile.imread(img_file).astype(np.float32)
+                mask = tifffile.imread(mask_file).astype(np.int64)
                 
                 # Validate shapes
                 if img.shape != mask.shape:
