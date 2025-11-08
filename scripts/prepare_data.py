@@ -451,53 +451,144 @@ class DatasetDiscovery:
         return discovered
     
     @staticmethod
+    # In scripts/prepare_data.py
+
     def discover_labeled_data(input_dir: Path) -> List[Dict]:
-        """Discover labeled pairs"""
+        """
+        ✅ FIXED: Discovers labeled data (NIfTI ONLY)
+        
+        Supports:
+        1. EBI-style (top-level): input_dir/raw/ + input_dir/gt/
+        2. SELMA3D-style (nested): input_dir/cFos/raw/ + input_dir/cFos/gt/
+        """
         discovered = []
         
-        # EBI format
-        raw_dir = input_dir / 'RAW'
-        gt_dir = input_dir / 'GT'
+        # ---
+        # Strategy 1: Check for EBI-style (raw/gt) at the TOP level
+        # ---
+        raw_dir = input_dir / 'raw'
+        gt_dir = input_dir / 'gt'
         
         if raw_dir.exists() and gt_dir.exists():
-            logger.info("Detected EBI format (RAW + GT)")
-            
+            logger.info(f"Detected top-level 'raw'/'gt' NIfTI structure in {input_dir}")
             img_files = sorted(raw_dir.glob("*.nii.gz"))
             
             for img_file in img_files:
-                mask_file = gt_dir / img_file.name
-                
+                # --- Fix for _0000 vs _000 ---
+                raw_stem = img_file.name.replace('.nii.gz', '')
+                stem_parts = raw_stem.split('_')[:-1]
+                gt_stem = '_'.join(stem_parts)
+                gt_filename = f"{gt_stem}.nii.gz"
+                mask_file = gt_dir / gt_filename
+                # --- End fix ---
+
                 if mask_file.exists():
                     discovered.append({
-                        'marker_type': 'unknown',
-                        'sample_name': img_file.stem.replace('.nii', ''),
+                        'marker_type': input_dir.name, # Use parent folder name
+                        'sample_name': gt_stem,
                         'img_path': img_file,
                         'mask_path': mask_file
                     })
+                else:
+                    logger.warning(f"  Missing mask for {img_file.name}, tried {gt_filename}")
         
+        # ---
+        # Strategy 2: Check for SELMA3D-style (nested marker folders)
+        # ---
         else:
-            # SELMA3D format
-            logger.info("Detected SELMA3D format")
-            
+            logger.info(f"No top-level 'raw'/'gt' found. Scanning for marker subfolders (e.g., cFos, vessel)...")
             marker_dirs = [d for d in input_dir.iterdir() if d.is_dir()]
             
+            if len(marker_dirs) == 0:
+                logger.warning(f"No marker subfolders found in {input_dir}")
+                return [] # Return empty
+
             for marker_dir in marker_dirs:
                 marker_name = marker_dir.name
                 
-                img_files = sorted(marker_dir.glob("*_img.tif"))
-                
-                for img_file in img_files:
-                    mask_file = img_file.parent / img_file.name.replace('_img.', '_mask.')
+                # ---
+                # Strategy 2a: Check for NESTED raw/gt (e.g., cFos/raw/)
+                # ---
+                nested_raw_dir = marker_dir / 'raw'
+                nested_gt_dir = marker_dir / 'gt'
+
+                if nested_raw_dir.exists() and nested_gt_dir.exists():
+                    logger.info(f"  Found 'raw'/'gt' structure in: {marker_name}")
+                    img_files = sorted(nested_raw_dir.glob("*.nii.gz"))
                     
-                    if mask_file.exists():
-                        discovered.append({
-                            'marker_type': marker_name,
-                            'sample_name': img_file.stem.replace('_img', ''),
-                            'img_path': img_file,
-                            'mask_path': mask_file
-                        })
-        
+                    for img_file in img_files:
+                        # --- Fix for _0000 vs _000 ---
+                        raw_stem = img_file.name.replace('.nii.gz', '')
+                        stem_parts = raw_stem.split('_')[:-1]
+                        gt_stem = '_'.join(stem_parts)
+                        gt_filename = f"{gt_stem}.nii.gz"
+                        mask_file = nested_gt_dir / gt_filename
+                        # --- End fix ---
+
+                        if mask_file.exists():
+                            discovered.append({
+                                'marker_type': marker_name,
+                                'sample_name': gt_stem,
+                                'img_path': img_file,
+                                'mask_path': mask_file
+                            })
+                        else:
+                            logger.warning(f"    Missing mask for {img_file.name}, tried {gt_filename}")
+                
+                # ---
+                # Strategy 2b (REMOVED): We no longer look for loose .tif files
+                # ---
+                else:
+                    logger.warning(f"  No 'raw'/'gt' subfolders found in {marker_name}. Skipping.")
+
         return discovered
+    # def discover_labeled_data(input_dir: Path) -> List[Dict]:
+    #     """Discover labeled pairs"""
+    #     discovered = []
+        
+    #     # EBI format
+    #     raw_dir = input_dir / 'raw'
+    #     gt_dir = input_dir / 'gt'
+        
+    #     if raw_dir.exists() and gt_dir.exists():
+    #         logger.info("Detected EBI format (RAW + GT)")
+            
+    #         img_files = sorted(raw_dir.glob("*.nii.gz"))
+            
+    #         for img_file in img_files:
+    #             mask_file = gt_dir / img_file.name
+                
+    #             if mask_file.exists():
+    #                 discovered.append({
+    #                     'marker_type': 'unknown',
+    #                     'sample_name': img_file.stem.replace('.nii', ''),
+    #                     'img_path': img_file,
+    #                     'mask_path': mask_file
+    #                 })
+        
+    #     else:
+    #         # SELMA3D format
+    #         logger.info("Detected SELMA3D format")
+            
+    #         marker_dirs = [d for d in input_dir.iterdir() if d.is_dir()]
+            
+    #         for marker_dir in marker_dirs:
+    #             marker_name = marker_dir.name
+                
+    #             img_files = sorted(marker_dir.glob("*_img.tif"))
+                
+    #             for img_file in img_files:
+    #                 mask_file = img_file.parent / img_file.name.replace('_img.', '_mask.')
+                    
+    #                 if mask_file.exists():
+    #                     discovered.append({
+    #                         'marker_type': marker_name,
+    #                         'sample_name': img_file.stem.replace('_img', ''),
+    #                         'img_path': img_file,
+    #                         'mask_path': mask_file
+    #                     })
+        
+    #     return discovered
 
 
 # =============================================================================
@@ -515,13 +606,13 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
     all_metadata = []
     
     marker_map = {
-        'cfos': 0,
-        'vessel': 1,
-        'nucleus': 2,
         'ab_plaque': 3,
         'ad_plaque': 3,
+        'cfos': 0,
         'microglia': 4,
-        'unknown': 5
+        'nucleus': 2,
+        'unknown': 5,
+        'vessel': 1
     }
     
     discovered_data = DatasetDiscovery.discover_unlabeled_data(input_dir)

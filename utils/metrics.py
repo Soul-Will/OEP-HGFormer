@@ -7,7 +7,7 @@ Evaluation metrics for 3D segmentation
 
 import numpy as np
 import torch
-from skimage.morphology import skeletonize_3d  # Requires scikit-image
+from skimage.morphology import skeletonize  # Requires scikit-image
 import logging
 
 logger = logging.getLogger(__name__)
@@ -98,8 +98,8 @@ def centerline_dice(pred, gt, smooth=1e-6):
     
     try:
         # ✅ CRITICAL FIX: Use 3D skeletonization
-        pred_skel = skeletonize_3d(pred_binary)
-        gt_skel = skeletonize_3d(gt_binary)
+        pred_skel = skeletonize(pred_binary)
+        gt_skel = skeletonize(gt_binary)
         
         # Compute Dice on skeletons
         intersection = (pred_skel & gt_skel).sum()
