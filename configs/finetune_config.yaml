@@ -74,7 +74,8 @@ data:
   train_dir: "data/processed/volumes_labeled/train"
   val_dir: "data/processed/volumes_labeled/val"
   test_dir: "data/processed/volumes_labeled/test"
-  
+  patch_size: [64, 128, 128]  # (D, H, W)
+  samples_per_volume: 10  # Patches per volume per epoc
   # Augmentation settings
   use_augmentation: true
   augmentation:

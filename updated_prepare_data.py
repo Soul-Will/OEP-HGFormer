@@ -1,9 +1,9 @@
 """
-Unified Data Preparation Pipeline - PERMANENT FIX VERSION
-✅ FIXED: Broadcasting error (lazy allocation)
-✅ FIXED: NumPy 32-bit overflow (HDF5)
-✅ ADDED: Robust error handling
-✅ ADDED: Progress tracking
+Unified Data Preparation Pipeline - Format Agnostic
+✅ FIXED: Supports TIFF (.tif) and NIfTI (.nii.gz) formats
+✅ FIXED: Auto-detects file format
+✅ FIXED: Preserves metadata (spacing, orientation)
+✅ FIXED: Handles multiple naming conventions
 """
 
 import numpy as np
@@ -12,11 +12,11 @@ import argparse
 from tqdm import tqdm
 import json
 import logging
-import h5py  # ✅ NEW: For large file handling
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from enum import Enum
 import warnings
 
+# Suppress PIL warnings
 warnings.filterwarnings('ignore')
 
 logging.basicConfig(
@@ -27,38 +27,55 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# FILE FORMAT DETECTION
+# SUPPORTED FILE FORMATS
 # =============================================================================
 
 class FileFormat(Enum):
-    """Supported formats"""
+    """Supported medical imaging formats"""
     TIFF = "tiff"
     NIFTI = "nifti"
     UNKNOWN = "unknown"
 
 
 def detect_file_format(file_path: Path) -> FileFormat:
-    """Auto-detect format from extension"""
+    """
+    Auto-detect file format from extension
+    
+    Args:
+        file_path: Path to file
+    
+    Returns:
+        FileFormat enum
+    """
     suffix = file_path.suffix.lower()
     
     if suffix in ['.tif', '.tiff']:
         return FileFormat.TIFF
     elif suffix in ['.nii', '.gz']:
+        # Check for .nii.gz
         if file_path.name.endswith('.nii.gz'):
             return FileFormat.NIFTI
         elif suffix == '.nii':
             return FileFormat.NIFTI
-    
-    return FileFormat.UNKNOWN
+        else:
+            return FileFormat.UNKNOWN
+    else:
+        return FileFormat.UNKNOWN
 
 
 # =============================================================================
-# ✅ PERMANENT FIX: UNIFIED VOLUME LOADER WITH HDF5
+# UNIFIED VOLUME LOADER
 # =============================================================================
 
 class VolumeLoader:
     """
-    ✅ FIXED: Format-agnostic loader with lazy allocation & HDF5 output
+    ✅ PERMANENT FIX: Format-agnostic 3D volume loader
+    
+    Supports:
+    - TIFF: 2D slices or 3D stacks
+    - NIfTI: 3D volumes (.nii or .nii.gz)
+    
+    Preserves metadata (spacing, orientation)
     """
     
     @staticmethod
@@ -72,11 +89,19 @@ class VolumeLoader:
         """
         Load 3D volume from TIFF or NIfTI
         
+        Args:
+            file_or_folder: Path to single file (.nii.gz) or folder (2D .tif slices)
+            downsample_xy: XY downsampling factor
+            downsample_z: Z downsampling factor
+            normalize: Whether to normalize intensities
+            max_slices: Max slices to load (for memory constraints)
+        
         Returns:
-            volume: (D, H, W) float32 array
-            metadata: Dict with spacing, format, etc.
+            volume: (D, H, W) numpy array or None if loading failed
+            metadata: Dict with spacing, orientation, etc.
         """
         if file_or_folder.is_file():
+            # Single file: Could be NIfTI or multi-page TIFF
             file_format = detect_file_format(file_or_folder)
             
             if file_format == FileFormat.NIFTI:
@@ -88,17 +113,17 @@ class VolumeLoader:
                     file_or_folder, downsample_xy, downsample_z, normalize
                 )
             else:
-                logger.error(f"Unknown format: {file_or_folder}")
+                logger.error(f"Unknown file format: {file_or_folder}")
                 return None, None
         
         elif file_or_folder.is_dir():
-            # ✅ CRITICAL FIX: This calls the fixed function
+            # Folder of 2D TIFF slices (original SELMA3D format)
             return VolumeLoader._load_tiff_slices(
                 file_or_folder, downsample_xy, downsample_z, normalize, max_slices
             )
         
         else:
-            logger.error(f"Path not found: {file_or_folder}")
+            logger.error(f"Path does not exist: {file_or_folder}")
             return None, None
     
     @staticmethod
@@ -108,24 +133,97 @@ class VolumeLoader:
         downsample_z: float = 1.0,
         normalize: bool = True
     ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
-        """Load NIfTI (unchanged from your original)"""
+        """
+        Load NIfTI file (.nii or .nii.gz)
+        
+        Returns:
+            volume: (D, H, W) array
+            metadata: Dict with spacing, affine, etc.
+        """
         try:
             import nibabel as nib
         except ImportError:
-            raise ImportError("Install nibabel: pip install nibabel")
+            raise ImportError(
+                "nibabel is required to load NIfTI files.\n"
+                "Install with: pip install nibabel"
+            )
         
         logger.info(f"  Loading NIfTI: {nifti_path.name}")
         
         try:
+            # Load NIfTI file
             nii = nib.load(str(nifti_path))
             volume = nii.get_fdata().astype(np.float32)
-            spacing = nii.header.get_zooms()[:3]
+            
+            # Get spacing from header
+            spacing = nii.header.get_zooms()[:3]  # (z, y, x) in mm
             
             logger.info(f"  Original shape: {volume.shape}")
             logger.info(f"  Spacing: {spacing} mm")
             
-            # NIfTI is (X,Y,Z) → convert to (D,H,W)
+            # NIfTI is (X, Y, Z) but we want (D, H, W) = (Z, Y, X)
             volume = np.transpose(volume, (2, 1, 0))
+            
+            # Downsample if needed
+            if downsample_xy != 1.0 or downsample_z != 1.0:
+                from scipy.ndimage import zoom
+                zoom_factors = (downsample_z, downsample_xy, downsample_xy)
+                volume = zoom(volume, zoom_factors, order=1)
+                logger.info(f"  Downsampled to: {volume.shape}")
+            
+            # Normalize
+            if normalize:
+                vol_min, vol_max = volume.min(), volume.max()
+                if vol_max > vol_min:
+                    volume = (volume - vol_min) / (vol_max - vol_min)
+            
+            # Metadata
+            metadata = {
+                'format': 'nifti',
+                'original_shape': nii.shape,
+                'spacing': tuple(spacing),
+                'affine': nii.affine.tolist(),
+                'orientation': nib.aff2axcodes(nii.affine)
+            }
+            
+            return volume, metadata
+        
+        except Exception as e:
+            logger.error(f"Failed to load NIfTI {nifti_path}: {e}")
+            return None, None
+    
+    @staticmethod
+    def _load_tiff_stack(
+        tiff_path: Path,
+        downsample_xy: float = 1.0,
+        downsample_z: float = 1.0,
+        normalize: bool = True
+    ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
+        """
+        Load multi-page TIFF stack
+        
+        Returns:
+            volume: (D, H, W) array
+            metadata: Dict with spacing
+        """
+        try:
+            import tifffile
+        except ImportError:
+            raise ImportError(
+                "tifffile is required to load TIFF files.\n"
+                "Install with: pip install tifffile"
+            )
+        
+        logger.info(f"  Loading TIFF stack: {tiff_path.name}")
+        
+        try:
+            volume = tifffile.imread(str(tiff_path)).astype(np.float32)
+            
+            logger.info(f"  Original shape: {volume.shape}")
+            
+            # Ensure 3D
+            if volume.ndim == 2:
+                volume = volume[np.newaxis, ...]
             
             # Downsample
             if downsample_xy != 1.0 or downsample_z != 1.0:
@@ -141,61 +239,14 @@ class VolumeLoader:
                     volume = (volume - vol_min) / (vol_max - vol_min)
             
             metadata = {
-                'format': 'nifti',
-                'original_shape': nii.shape,
-                'spacing': tuple(spacing),
-                'affine': nii.affine.tolist(),
-                'orientation': nib.aff2axcodes(nii.affine)
-            }
-            
-            return volume, metadata
-        
-        except Exception as e:
-            logger.error(f"Failed to load NIfTI: {e}")
-            return None, None
-    
-    @staticmethod
-    def _load_tiff_stack(
-        tiff_path: Path,
-        downsample_xy: float = 1.0,
-        downsample_z: float = 1.0,
-        normalize: bool = True
-    ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
-        """Load multi-page TIFF (unchanged)"""
-        try:
-            import tifffile
-        except ImportError:
-            raise ImportError("Install tifffile: pip install tifffile")
-        
-        logger.info(f"  Loading TIFF stack: {tiff_path.name}")
-        
-        try:
-            volume = tifffile.imread(str(tiff_path)).astype(np.float32)
-            logger.info(f"  Original shape: {volume.shape}")
-            
-            if volume.ndim == 2:
-                volume = volume[np.newaxis, ...]
-            
-            if downsample_xy != 1.0 or downsample_z != 1.0:
-                from scipy.ndimage import zoom
-                zoom_factors = (downsample_z, downsample_xy, downsample_xy)
-                volume = zoom(volume, zoom_factors, order=1)
-                logger.info(f"  Downsampled to: {volume.shape}")
-            
-            if normalize:
-                vol_min, vol_max = volume.min(), volume.max()
-                if vol_max > vol_min:
-                    volume = (volume - vol_min) / (vol_max - vol_min)
-            
-            metadata = {
                 'format': 'tiff_stack',
-                'spacing': (2.0, 1.0, 1.0)
+                'spacing': (2.0, 1.0, 1.0)  # Default LSM spacing
             }
             
             return volume, metadata
         
         except Exception as e:
-            logger.error(f"Failed to load TIFF stack: {e}")
+            logger.error(f"Failed to load TIFF stack {tiff_path}: {e}")
             return None, None
     
     @staticmethod
@@ -207,21 +258,21 @@ class VolumeLoader:
         max_slices: Optional[int] = None
     ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """
-        ✅ PERMANENT FIX: Lazy allocation to avoid broadcasting errors
+        Load folder of 2D TIFF slices (original SELMA3D format)
         
-        Key Changes:
-        1. Process all slices into a list first
-        2. Stack at the very end (shape guaranteed consistent)
-        3. No pre-allocation → no rounding mismatch possible
+        Returns:
+            volume: (D, H, W) array
+            metadata: Dict with spacing
         """
         try:
             from PIL import Image
         except ImportError:
-            raise ImportError("Install Pillow: pip install Pillow")
+            raise ImportError(
+                "Pillow is required to load TIFF slices.\n"
+                "Install with: pip install Pillow"
+            )
         
-        from scipy.ndimage import zoom
-        
-        # Find TIFF files
+        # Find all TIFF files
         slice_files = sorted(
             list(folder.glob("*.tif")) + list(folder.glob("*.tiff")),
             key=lambda x: int(''.join(filter(str.isdigit, x.stem))) 
@@ -229,7 +280,7 @@ class VolumeLoader:
         )
         
         if len(slice_files) == 0:
-            logger.warning(f"No .tif files in {folder}")
+            logger.warning(f"No .tif files found in {folder}")
             return None, None
         
         # Limit slices if specified
@@ -239,187 +290,90 @@ class VolumeLoader:
         
         logger.info(f"  Loading {len(slice_files)} TIFF slices...")
         
-        # ✅ FIX STEP 1: Process all slices into a list (flexible)
-        processed_slices = []
+        # Load first slice to get dimensions
+        first_slice = np.array(Image.open(slice_files[0]))
+        H, W = first_slice.shape
+        D = len(slice_files)
         
-        for slice_file in tqdm(slice_files, desc="  Processing", leave=False):
+        # Calculate output dimensions
+        if downsample_z != 1.0:
+            D_out = max(1, int(D * downsample_z))
+            z_indices = np.linspace(0, D - 1, D_out, dtype=int)
+        else:
+            D_out = D
+            z_indices = range(D)
+        
+        if downsample_xy != 1.0:
+            H_out = max(1, int(H * downsample_xy))
+            W_out = max(1, int(W * downsample_xy))
+        else:
+            H_out, W_out = H, W
+        
+        logger.info(f"  Original shape: ({D}, {H}, {W})")
+        logger.info(f"  Output shape: ({D_out}, {H_out}, {W_out})")
+        
+        # Preallocate volume
+        volume = np.zeros((D_out, H_out, W_out), dtype=np.float32)
+        
+        # Load and process slices
+        for i, z_idx in enumerate(tqdm(z_indices, desc="  Stacking", leave=False)):
             try:
-                # Load slice
-                slice_img = np.array(Image.open(slice_file)).astype(np.float32)
+                slice_img = np.array(Image.open(slice_files[z_idx])).astype(np.float32)
                 
-                # Downsample XY (let zoom decide output shape)
+                # Downsample XY
                 if downsample_xy != 1.0:
+                    from scipy.ndimage import zoom
                     slice_img = zoom(slice_img, downsample_xy, order=1)
                 
-                # Normalize THIS slice
+                # Normalize
                 if normalize:
                     slice_min, slice_max = slice_img.min(), slice_img.max()
                     if slice_max > slice_min:
                         slice_img = (slice_img - slice_min) / (slice_max - slice_min)
                 
-                processed_slices.append(slice_img)
+                volume[i] = slice_img
             
             except Exception as e:
-                logger.error(f"  Failed to load {slice_file.name}: {e}")
+                logger.error(f"  Failed to load slice {z_idx}: {e}")
                 raise
-        
-        # ✅ FIX STEP 2: Stack at the end (shape guaranteed consistent)
-        try:
-            volume = np.stack(processed_slices, axis=0)  # ✅ NumPy handles shape validation
-        except ValueError as e:
-            logger.error(f"Slice shape mismatch detected: {e}")
-            logger.error("This means zoom() produced different shapes for different slices.")
-            logger.error("Inspect your input data for inconsistencies.")
-            raise
-        
-        logger.info(f"  ✅ Stacked volume shape: {volume.shape}")
-        
-        # Downsample Z if needed
-        if downsample_z != 1.0:
-            D, H, W = volume.shape
-            D_out = max(1, int(D * downsample_z))
-            
-            # Resample along Z axis
-            volume = zoom(volume, (downsample_z, 1.0, 1.0), order=1)
-            logger.info(f"  Downsampled Z: {volume.shape}")
         
         metadata = {
             'format': 'tiff_slices',
-            'spacing': (2.0, 1.0, 1.0),
-            'num_slices': len(processed_slices)
+            'spacing': (2.0, 1.0, 1.0)
         }
         
         return volume, metadata
 
 
 # =============================================================================
-# ✅ PERMANENT FIX: HDF5 SAVING FUNCTION
-# =============================================================================
-
-def save_volume_hdf5(
-    volume: np.ndarray,
-    output_path: Path,
-    metadata: Dict,
-    compression: str = 'gzip',
-    compression_opts: int = 4
-) -> Dict:
-    """
-    ✅ PERMANENT FIX: Save large volumes to HDF5 (no size limit!)
-    
-    Args:
-        volume: (D, H, W) array
-        output_path: Path to .h5 file
-        metadata: Dict with spacing, format, etc.
-        compression: 'gzip' (best) or 'lzf' (fastest)
-        compression_opts: 1-9 (gzip only, 4 = balanced)
-    
-    Returns:
-        save_metadata: Dict with file size, compression ratio, etc.
-    """
-    output_path = output_path.with_suffix('.h5')  # Force .h5 extension
-    
-    logger.info(f"  Saving to HDF5: {output_path.name}")
-    
-    try:
-        with h5py.File(output_path, 'w') as f:
-            # Save volume with compression
-            f.create_dataset(
-                'volume',
-                data=volume,
-                compression=compression,
-                compression_opts=compression_opts,
-                dtype=np.float32
-            )
-            
-            # Save metadata as attributes
-            for key, value in metadata.items():
-                if isinstance(value, (int, float, str, bool)):
-                    f['volume'].attrs[key] = value
-                elif isinstance(value, (list, tuple)):
-                    f['volume'].attrs[key] = str(value)
-        
-        # Get file stats
-        file_size_mb = output_path.stat().st_size / 1e6
-        
-        # Calculate compression ratio
-        uncompressed_size_mb = volume.nbytes / 1e6
-        compression_ratio = uncompressed_size_mb / file_size_mb if file_size_mb > 0 else 1.0
-        
-        logger.info(f"  ✅ Saved: {file_size_mb:.1f} MB (compression: {compression_ratio:.2f}x)")
-        
-        return {
-            'file_path': str(output_path),
-            'file_size_mb': file_size_mb,
-            'uncompressed_size_mb': uncompressed_size_mb,
-            'compression_ratio': compression_ratio,
-            'compression': compression
-        }
-    
-    except Exception as e:
-        logger.error(f"Failed to save HDF5: {e}")
-        raise
-
-
-def load_volume_hdf5(hdf5_path: Path) -> Tuple[np.ndarray, Dict]:
-    """
-    Load volume from HDF5
-    
-    Args:
-        hdf5_path: Path to .h5 file
-    
-    Returns:
-        volume: (D, H, W) array
-        metadata: Dict with spacing, etc.
-    """
-    with h5py.File(hdf5_path, 'r') as f:
-        volume = f['volume'][:]  # Load full volume
-        
-        # Extract metadata
-        metadata = dict(f['volume'].attrs)
-    
-    return volume, metadata
-
-
-def load_patch_hdf5(
-    hdf5_path: Path,
-    patch_slice: Tuple[slice, slice, slice]
-) -> np.ndarray:
-    """
-    ✅ CRITICAL: Load ONLY a patch from HDF5 (memory efficient!)
-    
-    Args:
-        hdf5_path: Path to .h5 file
-        patch_slice: Tuple of (slice_d, slice_h, slice_w)
-                     e.g., (slice(0,64), slice(0,128), slice(0,128))
-    
-    Returns:
-        patch: (D, H, W) array (only the requested region)
-    
-    Example:
-        # Load patch at (z=100, y=200, x=300) with size (64, 128, 128)
-        patch = load_patch_hdf5(
-            Path('brain.h5'),
-            (slice(100, 164), slice(200, 328), slice(300, 428))
-        )
-    """
-    with h5py.File(hdf5_path, 'r') as f:
-        patch = f['volume'][patch_slice]  # ✅ HDF5 only reads this region from disk!
-    
-    return patch
-
-
-# =============================================================================
-# DATA DISCOVERY (unchanged from your original)
+# DATA DISCOVERY: FLEXIBLE NAMING CONVENTIONS
 # =============================================================================
 
 class DatasetDiscovery:
-    """Flexible data discovery for multiple naming conventions"""
+    """
+    ✅ PERMANENT FIX: Flexible data discovery for multiple naming conventions
+    
+    Supports:
+    - SELMA3D Challenge: marker_folders/brain_folders/*.tif
+    - EBI BioStudies: RAW/*.nii.gz + GT/*.nii.gz
+    - Custom formats
+    """
     
     @staticmethod
     def discover_unlabeled_data(input_dir: Path) -> List[Dict]:
-        """Discover unlabeled volumes"""
+        """
+        Discover unlabeled data with flexible naming
+        
+        Supports:
+        1. Folder-based: marker_type/brain_name/*.tif
+        2. File-based: marker_type/brain_name.nii.gz
+        
+        Returns:
+            List of dicts with 'marker_type', 'brain_name', 'path'
+        """
         discovered = []
         
+        # Find all subdirectories (marker types)
         marker_dirs = [d for d in input_dir.iterdir() if d.is_dir()]
         
         for marker_dir in marker_dirs:
@@ -429,6 +383,7 @@ class DatasetDiscovery:
             nifti_files = list(marker_dir.glob("*.nii.gz")) + list(marker_dir.glob("*.nii"))
             
             if nifti_files:
+                # File-based format (e.g., EBI)
                 for nifti_file in nifti_files:
                     discovered.append({
                         'marker_type': marker_name,
@@ -437,7 +392,7 @@ class DatasetDiscovery:
                         'is_file': True
                     })
             else:
-                # Folder-based (TIFF slices)
+                # Folder-based format (e.g., SELMA3D)
                 brain_folders = [d for d in marker_dir.iterdir() if d.is_dir()]
                 
                 for brain_folder in brain_folders:
@@ -452,38 +407,52 @@ class DatasetDiscovery:
     
     @staticmethod
     def discover_labeled_data(input_dir: Path) -> List[Dict]:
-        """Discover labeled pairs"""
+        """
+        Discover labeled data with flexible naming
+        
+        Supports:
+        1. SELMA3D: marker/patch_XXX_img.tif + patch_XXX_mask.tif
+        2. EBI: RAW/patchvolume_XXX.nii.gz + GT/patchvolume_XXX.nii.gz
+        
+        Returns:
+            List of dicts with 'marker_type', 'sample_name', 'img_path', 'mask_path'
+        """
         discovered = []
         
-        # EBI format
+        # Check for EBI-style structure (RAW + GT folders)
         raw_dir = input_dir / 'RAW'
         gt_dir = input_dir / 'GT'
         
         if raw_dir.exists() and gt_dir.exists():
-            logger.info("Detected EBI format (RAW + GT)")
+            # EBI format
+            logger.info("Detected EBI BioStudies format (RAW + GT)")
             
             img_files = sorted(raw_dir.glob("*.nii.gz"))
             
             for img_file in img_files:
+                # Find corresponding mask in GT folder
                 mask_file = gt_dir / img_file.name
                 
                 if mask_file.exists():
                     discovered.append({
-                        'marker_type': 'unknown',
+                        'marker_type': 'unknown',  # No marker type in EBI format
                         'sample_name': img_file.stem.replace('.nii', ''),
                         'img_path': img_file,
                         'mask_path': mask_file
                     })
+                else:
+                    logger.warning(f"Missing mask for {img_file.name}")
         
         else:
             # SELMA3D format
-            logger.info("Detected SELMA3D format")
+            logger.info("Detected SELMA3D Challenge format (marker folders)")
             
             marker_dirs = [d for d in input_dir.iterdir() if d.is_dir()]
             
             for marker_dir in marker_dirs:
                 marker_name = marker_dir.name
                 
+                # Check for TIFF pairs
                 img_files = sorted(marker_dir.glob("*_img.tif"))
                 
                 for img_file in img_files:
@@ -496,17 +465,19 @@ class DatasetDiscovery:
                             'img_path': img_file,
                             'mask_path': mask_file
                         })
+                    else:
+                        logger.warning(f"Missing mask for {img_file.name}")
         
         return discovered
 
 
 # =============================================================================
-# ✅ MAIN PROCESSING FUNCTIONS (REFACTORED WITH HDF5)
+# MAIN PROCESSING FUNCTIONS (Refactored)
 # =============================================================================
 
 def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
     """
-    ✅ REFACTORED: Now saves to HDF5 instead of .npy
+    ✅ REFACTORED: Format-agnostic unlabeled data processing
     """
     logger.info("\n" + "="*80)
     logger.info("PROCESSING UNLABELED DATA (SSL)")
@@ -514,6 +485,7 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
     
     all_metadata = []
     
+    # Marker type mapping
     marker_map = {
         'cfos': 0,
         'vessel': 1,
@@ -524,6 +496,7 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
         'unknown': 5
     }
     
+    # ✅ CRITICAL: Flexible data discovery
     discovered_data = DatasetDiscovery.discover_unlabeled_data(input_dir)
     
     if len(discovered_data) == 0:
@@ -531,6 +504,7 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
     
     logger.info(f"Discovered {len(discovered_data)} volumes\n")
     
+    # Group by marker type for logging
     from collections import defaultdict
     by_marker = defaultdict(list)
     for item in discovered_data:
@@ -542,6 +516,7 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
         logger.info(f"📁 Processing marker: {marker_name} (label={marker_label})")
         logger.info(f"  Found {len(items)} volumes")
         
+        # Create output directory
         output_marker_dir = output_dir / marker_name
         output_marker_dir.mkdir(parents=True, exist_ok=True)
         
@@ -549,8 +524,8 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
             brain_name = item['brain_name']
             logger.info(f"\n  Processing: {brain_name}")
             
-            # Load volume (uses fixed lazy allocation)
-            volume, vol_metadata = VolumeLoader.load_volume(
+            # ✅ CRITICAL: Use unified loader
+            volume, metadata = VolumeLoader.load_volume(
                 item['path'],
                 downsample_xy=args.downsample_xy,
                 downsample_z=args.downsample_z,
@@ -562,20 +537,12 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
                 logger.warning(f"  Skipping {brain_name} (loading failed)")
                 continue
             
-            # ✅ CRITICAL: Save as HDF5 instead of .npy
-            output_file = output_marker_dir / f"{brain_name}"  # No extension yet
+            # Save as .npy
+            output_file = output_marker_dir / f"{brain_name}.npy"
+            np.save(output_file, volume)
             
-            try:
-                save_info = save_volume_hdf5(
-                    volume,
-                    output_file,
-                    vol_metadata,
-                    compression='gzip',
-                    compression_opts=4
-                )
-            except Exception as e:
-                logger.error(f"  Failed to save {brain_name}: {e}")
-                continue
+            file_size_mb = output_file.stat().st_size / 1e6
+            logger.info(f"  ✅ Saved: {output_file.name} ({file_size_mb:.1f} MB)")
             
             # Store metadata
             meta = {
@@ -583,11 +550,10 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
                 'marker_type': marker_name,
                 'marker_label': marker_label,
                 'shape': list(volume.shape),
-                'file_path': str(Path(save_info['file_path']).relative_to(output_dir)),
-                'file_size_mb': save_info['file_size_mb'],
-                'compression_ratio': save_info['compression_ratio'],
-                'original_format': vol_metadata.get('format', 'unknown'),
-                'spacing': vol_metadata.get('spacing', (2.0, 1.0, 1.0)),
+                'file_path': str(output_file.relative_to(output_dir)),
+                'file_size_mb': file_size_mb,
+                'original_format': metadata.get('format', 'unknown'),
+                'spacing': metadata.get('spacing', (2.0, 1.0, 1.0)),
                 'processing': {
                     'downsample_xy': args.downsample_xy,
                     'downsample_z': args.downsample_z,
@@ -603,14 +569,12 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
             'num_volumes': len(all_metadata),
             'marker_types': list(set(m['marker_type'] for m in all_metadata)),
             'total_size_mb': sum(m['file_size_mb'] for m in all_metadata),
-            'volumes': all_metadata,
-            'storage_format': 'hdf5'  # ✅ NEW
+            'volumes': all_metadata
         }, f, indent=2)
     
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ Processed {len(all_metadata)} unlabeled volumes")
     logger.info(f"✅ Total size: {sum(m['file_size_mb'] for m in all_metadata):.1f} MB")
-    logger.info(f"✅ Storage format: HDF5 (no size limit)")
     logger.info(f"✅ Metadata saved: {metadata_path}")
     logger.info(f"{'='*80}")
     
@@ -619,7 +583,7 @@ def process_unlabeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict
 
 def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
     """
-    ✅ REFACTORED: Now saves to HDF5
+    ✅ REFACTORED: Format-agnostic labeled data processing
     """
     logger.info("\n" + "="*80)
     logger.info("PROCESSING LABELED DATA (FINE-TUNING)")
@@ -627,6 +591,7 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
     
     all_samples = []
     
+    # ✅ CRITICAL: Flexible data discovery
     discovered_pairs = DatasetDiscovery.discover_labeled_data(input_dir)
     
     if len(discovered_pairs) == 0:
@@ -634,6 +599,7 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
     
     logger.info(f"Discovered {len(discovered_pairs)} image-mask pairs\n")
     
+    # Process each pair
     for pair in tqdm(discovered_pairs, desc="Processing samples"):
         try:
             # Load image
@@ -649,15 +615,17 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
                 pair['mask_path'],
                 downsample_xy=args.downsample_xy,
                 downsample_z=args.downsample_z,
-                normalize=False
+                normalize=False  # Don't normalize masks!
             )
             
             if img is None or mask is None:
                 logger.warning(f"  Failed to load {pair['sample_name']}, skipping")
                 continue
             
+            # Ensure mask is integer
             mask = mask.astype(np.int64)
             
+            # Validate shapes
             if img.shape != mask.shape:
                 logger.warning(
                     f"  Shape mismatch: {pair['sample_name']} "
@@ -665,6 +633,7 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
                 )
                 continue
             
+            # Store
             all_samples.append({
                 'img': img,
                 'mask': mask,
@@ -705,7 +674,7 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
     
     logger.info(f"Split: Train={len(train_samples)}, Val={len(val_samples)}, Test={len(test_samples)}")
     
-    # Save splits to HDF5
+    # Save splits
     split_metadata = {}
     
     for split_name, split_samples in [
@@ -718,51 +687,20 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
         split_meta = []
         
         for idx, sample in enumerate(tqdm(split_samples, desc=f"Saving {split_name}")):
+            # Create unique filename
             base_name = f"{sample['marker_type']}_{idx:04d}"
             
-            # ✅ CRITICAL: Save as HDF5 with both image and mask in same file
-            output_file = split_dir / f"{base_name}.h5"
+            # Save image and mask
+            np.save(split_dir / f"{base_name}_img.npy", sample['img'])
+            np.save(split_dir / f"{base_name}_mask.npy", sample['mask'])
             
-            try:
-                with h5py.File(output_file, 'w') as f:
-                    # Save image
-                    f.create_dataset(
-                        'image',
-                        data=sample['img'],
-                        compression='gzip',
-                        compression_opts=4,
-                        dtype=np.float32
-                    )
-                    
-                    # Save mask
-                    f.create_dataset(
-                        'mask',
-                        data=sample['mask'],
-                        compression='gzip',
-                        compression_opts=4,
-                        dtype=np.int64
-                    )
-                    
-                    # Save metadata as attributes
-                    f['image'].attrs['marker_type'] = sample['marker_type']
-                    f['image'].attrs['original_filename'] = sample['filename']
-                    f['image'].attrs['shape'] = str(sample['shape'])
-                
-                file_size_mb = output_file.stat().st_size / 1e6
-                
-                split_meta.append({
-                    'filename': base_name,
-                    'marker_type': sample['marker_type'],
-                    'shape': list(sample['shape']),
-                    'original_name': sample['filename'],
-                    'original_format': sample['format'],
-                    'file_size_mb': file_size_mb,
-                    'file_path': str(output_file.relative_to(output_dir))
-                })
-            
-            except Exception as e:
-                logger.error(f"Failed to save {base_name}: {e}")
-                continue
+            split_meta.append({
+                'filename': base_name,
+                'marker_type': sample['marker_type'],
+                'shape': list(sample['shape']),
+                'original_name': sample['filename'],
+                'original_format': sample['format']
+            })
         
         split_metadata[split_name] = split_meta
     
@@ -777,13 +715,11 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
                 'test': len(test_samples)
             },
             'marker_types': list(set(s['marker_type'] for s in all_samples)),
-            'data': split_metadata,
-            'storage_format': 'hdf5'  # ✅ NEW
+            'data': split_metadata
         }, f, indent=2)
     
     logger.info(f"\n{'='*80}")
     logger.info(f"✅ Processed {len(all_samples)} labeled samples")
-    logger.info(f"✅ Storage format: HDF5 (image + mask in same file)")
     logger.info(f"✅ Metadata saved: {metadata_path}")
     logger.info(f"{'='*80}")
     
@@ -796,32 +732,27 @@ def process_labeled_data(input_dir: Path, output_dir: Path, args) -> List[Dict]:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Prepare SELMA3D dataset - PERMANENT FIX VERSION',
+        description='Prepare SELMA3D dataset (labeled + unlabeled) - Format Agnostic',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-✅ PERMANENT FIXES:
-  1. Broadcasting error: Lazy allocation (no pre-calculation)
-  2. NumPy overflow: HDF5 storage (no 2GB limit)
-  3. Memory efficiency: Patch loading from HDF5
-
 Examples:
-  # Process unlabeled data (SSL)
+  # Process SELMA3D Challenge unlabeled data (TIFF slices)
   python prepare_data.py \\
       --input_dir data/raw/train_unlabeled \\
       --output_dir data/processed/volumes_ssl \\
       --data_type unlabeled
   
-  # Process labeled data (fine-tuning)
+  # Process EBI BioStudies labeled data (NIfTI)
   python prepare_data.py \\
-      --input_dir data/raw/train_labeled \\
+      --input_dir data/raw/S-BIAD1196/Files \\
       --output_dir data/processed/volumes_labeled \\
       --data_type labeled
   
   # With downsampling
   python prepare_data.py \\
-      --input_dir data/raw/train_unlabeled \\
-      --output_dir data/processed/volumes_ssl \\
-      --data_type unlabeled \\
+      --input_dir data/raw/train_labeled \\
+      --output_dir data/processed/volumes_labeled \\
+      --data_type labeled \\
       --downsample_xy 0.5 \\
       --downsample_z 0.5
         """
@@ -848,7 +779,7 @@ Examples:
     
     # Memory optimization
     parser.add_argument('--max_slices_in_memory', type=int, default=None,
-                       help='Max slices to process at once (for very large stacks)')
+                       help='Max slices to load at once (for large TIFF stacks)')
     
     return parser.parse_args()
 
@@ -860,7 +791,7 @@ def main():
     output_dir = Path(args.output_dir)
     
     logger.info("="*80)
-    logger.info("SELMA3D DATA PREPARATION - PERMANENT FIX VERSION")
+    logger.info("SELMA3D DATA PREPARATION - FORMAT AGNOSTIC")
     logger.info("="*80)
     logger.info(f"Input:  {input_dir}")
     logger.info(f"Output: {output_dir}")
@@ -868,11 +799,6 @@ def main():
     logger.info(f"XY Downsample: {args.downsample_xy}x")
     logger.info(f"Z Downsample:  {args.downsample_z}x")
     logger.info(f"Normalize: {args.normalize}")
-    logger.info("")
-    logger.info("✅ PERMANENT FIXES APPLIED:")
-    logger.info("  1. Lazy allocation (no broadcasting errors)")
-    logger.info("  2. HDF5 storage (no 2GB limit)")
-    logger.info("  3. Patch-based loading (memory efficient)")
     logger.info("")
     logger.info("Supported formats:")
     logger.info("  ✅ TIFF (.tif, .tiff) - 2D slices or 3D stacks")

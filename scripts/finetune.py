@@ -157,9 +157,11 @@ def create_dataloaders(config: Dict, device: torch.device) -> tuple:
     """
     logger.info("\nCreating dataloaders...")
     
-    # Get augmentation config
+    # Get config
     aug_config = config['data'].get('augmentation', {})
     use_augmentation = config['data'].get('use_augmentation', True)
+    patch_size = tuple(config['data'].get('patch_size', [64, 128, 128]))
+    samples_per_volume = config['data'].get('samples_per_volume', 10)
     
     # Create transforms
     if use_augmentation:
@@ -171,19 +173,23 @@ def create_dataloaders(config: Dict, device: torch.device) -> tuple:
     
     val_transform = get_val_transforms()
     
-    # ✅ FIXED: Direct path usage (no split argument confusion)
+    # ✅ FIXED: Pass patch_size to dataset
     train_dataset = SELMA3DDataset(
         data_dir=config['data']['train_dir'],
+        patch_size=patch_size,
+        samples_per_volume=samples_per_volume,
         transform=train_transform
     )
     
     val_dataset = SELMA3DDataset(
         data_dir=config['data']['val_dir'],
+        patch_size=patch_size,
+        samples_per_volume=5,  # Fewer patches for faster validation
         transform=val_transform
     )
     
-    logger.info(f"  Train dataset: {len(train_dataset)} samples")
-    logger.info(f"  Val dataset: {len(val_dataset)} samples")
+    logger.info(f"  Train dataset: {len(train_dataset)} patches")
+    logger.info(f"  Val dataset: {len(val_dataset)} patches")
     
     # Validate dataset sizes
     if len(train_dataset) == 0:
